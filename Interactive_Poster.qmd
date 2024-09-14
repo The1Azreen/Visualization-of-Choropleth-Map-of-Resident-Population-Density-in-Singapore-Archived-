@@ -1,0 +1,200 @@
+---
+Title: "AAI1001 Data Engineering and Visualization Group 3 Project"
+Author: "Group 3"
+embed-resources: true
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    number-sections: true
+    number-depth: 2
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+#| include: true
+
+# To view poster, Render the file.
+# To view interactable Shiny App, Run the code chunks (Setup, Data Engineering, Data Cleaning, Data Aggregation, Plotting of Choropleth Map) below.
+```
+
+```{r}
+#| label: Setup
+#| include: false
+
+library(knitr)
+library(readxl)
+library(tidyverse)
+library(here)
+library(shiny)
+library(leaflet)
+library(dplyr)
+library(sf)
+```
+
+```{r}
+#| label: Data Engineering
+#| include: true
+
+# Define the path to the KML file (ensure this path is correct) We use this KML to set the boundary for our Singapore Map
+kml_file_path <- "data/MasterPlan2019PlanningAreaBoundaryNoSea.kml"
+
+# Read the KML file
+singapore_map <- st_read(kml_file_path)
+
+# Drop the description column
+singapore_map <- singapore_map %>% select(-Description)
+
+# Load cleaned data from previous assignment
+cleaned_data <- read_csv("data/cleaned_data.csv")
+
+# For each unique PA, calculate the total population and store it in a new row before next PA
+summary_data <- cleaned_data %>%
+  group_by(PA, Time) %>%
+  summarise(AgeGroup = 'Total', TotalPop = sum(TotalPop)) %>%
+  ungroup()
+
+# Combine the summarized rows with the original dataframe
+summarized_cleaned_data <- bind_rows(cleaned_data, summary_data) %>%
+  arrange(PA, Time, factor(AgeGroup, levels = unique(c(AgeGroup, "Total"))))
+
+# Uppercase the PA column in the cleaned data
+summarized_cleaned_data_UPPER <- summarized_cleaned_data %>%
+  mutate(PA = toupper(PA))
+```
+
+```{r}
+#| label: Data Cleaning
+#| include: true
+
+# Clean and validate the geometries
+singapore_map_clean <- st_make_valid(singapore_map)
+
+# Optionally, check for and remove any empty geometries
+singapore_map_clean <- singapore_map_clean[!st_is_empty(singapore_map_clean),]
+```
+
+```{r}
+#| label: Data Aggregation
+#| include: true
+
+# Aggregate both the KML data and the cleaned data
+merged_data <- singapore_map_clean %>%
+  left_join(summarized_cleaned_data_UPPER, by = c("Name" = "PA"))
+```
+
+```{r}
+#| label: Plotting of Choropleth Map
+#| include: true
+
+# Create a UI for the Shiny app
+ui <- fluidPage(
+  # Create a slider input
+  sliderInput("year_slider", "Select Year:", 
+              min = min(merged_data$Time), 
+              max = max(merged_data$Time), 
+              value = min(merged_data$Time), 
+              step = 1),
+   tags$style(HTML("
+    .dropdown-container {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000; /* Ensure dropdown is above other elements */
+    }
+    .map-container {
+      position: relative;
+    }
+  ")),
+  
+  # Create a dropdown menu for Agegroup inside a div for positioning
+  div(class = "dropdown-container",
+      selectInput("agegroup_filter", "Select Agegroup:",
+                  choices = unique(merged_data$AgeGroup),
+                  selected = unique(merged_data$AgeGroup)[-1])
+  ),
+
+  
+  # Create a leaflet map
+  leafletOutput("map"),
+  
+  # Create a text output to display hover information
+  textOutput("hover_info")
+)
+
+# Create a server function for the Shiny app
+server <- function(input, output, session) {
+  # Create a reactive expression to filter the data based on the slider input
+    reactive_data <- reactive({
+    req(input$year_slider, input$agegroup_filter)  # Ensure inputs are available
+    merged_data %>% 
+      filter(Time == input$year_slider, AgeGroup == input$agegroup_filter)
+  })
+  
+  # Create the leaflet map
+  output$map <- renderLeaflet({
+     req(reactive_data())
+    # Define the color palette for population density (blue to red)
+    pal <- colorNumeric(
+      palette = c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"), # Blue to red color palette
+      domain = reactive_data()$TotalPop
+    )
+    
+    leaflet(reactive_data()) %>% 
+      addPolygons(
+        color = "black",  # Set border color
+        weight = 2,       # Set border weight
+        smoothFactor = 0.5,
+        opacity = 1.0, 
+        fillOpacity = 0.5,
+        fillColor = ~pal(TotalPop), # Fill color by population with gradient
+        highlightOptions = highlightOptions(
+          color = "white", 
+          weight = 2,
+          bringToFront = TRUE
+        ),
+        label = ~paste0("Planning Area: ", Name, "\n Total Population (", input$year_slider, "): ", TotalPop),
+        
+        layerId = ~Name  # Set layerId to Name for identifying the polygons
+      ) %>% 
+      addLegend(
+        position = "bottomright", 
+        pal = pal, 
+        values = ~TotalPop,
+        title = "Population Density"
+      )
+  })
+  
+   observeEvent(input$map_shape_mouseover, {
+    hover <- input$map_shape_mouseover
+    name <- hover$id
+    print(name)
+    
+    if (!is.null(name)) {
+      # Filter the data to get the TotalPop for the hovered area
+      total_pop <- reactive_data() %>% 
+        filter(Name == name) %>%
+        slice(1) %>%
+        pull(TotalPop)
+      print(total_pop)  
+      
+      output$hover_info <- renderText({
+        paste("Planning Area: ", name, "\nTotal Population: ", total_pop)
+      })
+    }
+  })
+  
+    # Observe mouseout events and clear hover_info
+  observeEvent(input$map_shape_mouseout, {
+    output$hover_info <- renderText({
+      ""
+    })
+  })
+}
+
+# Run the Shiny app
+shinyApp(ui, server)
+```

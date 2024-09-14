@@ -1,0 +1,268 @@
+---
+title: Visualization of Choropleth Map of Resident Population Density in Singapore
+format:
+  poster-typst: 
+    keep-typ: true
+    size: "36x24"
+    poster-authors: "Azreen, Kai Jun, Aloysius, Irfan, Beata"
+    departments: "&nbsp;"
+    institution-logo: "./images/sit.png"
+    footer-text: "AAI1001 AY23/24 Tri 3 Team Project"
+    footer-url: "&nbsp;"
+    footer-emails: "Team 03"
+    footer-color: "ebcfb2"
+---
+
+```{r}
+#| include: false
+
+# To view poster, Render the file.
+# To view interactable Shiny App, Run the code chunks (Setup, Data Engineering, Data Cleaning, Data Aggregation, Plotting of Choropleth Map) below.
+```
+
+```{r}
+#| label: Setup
+#| include: false
+
+library(knitr)
+library(readxl)
+library(tidyverse)
+library(here)
+library(shiny)
+library(leaflet)
+library(dplyr)
+library(sf)
+```
+
+```{r}
+#| label: Data Engineering
+#| include: false
+
+# Define the path to the KML file (ensure this path is correct)
+kml_file_path <- "data/MasterPlan2019PlanningAreaBoundaryNoSea.kml"
+
+# Read the KML file
+singapore_map <- st_read(kml_file_path)
+
+# Drop the description column
+singapore_map <- singapore_map %>% select(-Description)
+
+# Load cleaned data from previous assignment
+cleaned_data <- read_csv("data/cleaned_data.csv")
+
+# For each unique PA, calculate the total population and store it in a new row before next PA
+summary_data <- cleaned_data %>%
+  group_by(PA, Time) %>%
+  summarise(AgeGroup = 'Total', TotalPop = sum(TotalPop)) %>%
+  ungroup()
+
+# Combine the summarized rows with the original dataframe
+summarized_cleaned_data <- bind_rows(cleaned_data, summary_data) %>%
+  arrange(PA, Time, factor(AgeGroup, levels = unique(c(AgeGroup, "Total"))))
+
+# Uppercase the PA column in the cleaned data
+summarized_cleaned_data_UPPER <- summarized_cleaned_data %>%
+  mutate(PA = toupper(PA))
+```
+
+```{r}
+#| label: Data Cleaning
+#| include: false
+
+# Clean and validate the geometries
+singapore_map_clean <- st_make_valid(singapore_map)
+
+# Optionally, check for and remove any empty geometries
+singapore_map_clean <- singapore_map_clean[!st_is_empty(singapore_map_clean),]
+```
+
+```{r}
+#| label: Data Aggregation
+#| include: false
+
+# Aggregate both the KML data and the cleaned data
+merged_data <- singapore_map_clean %>%
+  left_join(summarized_cleaned_data_UPPER, by = c("Name" = "PA"))
+```
+
+```{r}
+#| label: Plotting of Choropleth Map
+#| include: false
+
+# Create a UI for the Shiny app
+ui <- fluidPage(
+  # Create a slider input
+  sliderInput("year_slider", "Select Year:", 
+              min = min(merged_data$Time), 
+              max = max(merged_data$Time), 
+              value = min(merged_data$Time), 
+              step = 1),
+   tags$style(HTML("
+    .dropdown-container {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000; /* Ensure dropdown is above other elements */
+    }
+    .map-container {
+      position: relative;
+    }
+  ")),
+  
+  # Create a dropdown menu for Agegroup inside a div for positioning
+  div(class = "dropdown-container",
+      selectInput("agegroup_filter", "Select Agegroup:",
+                  choices = unique(merged_data$AgeGroup),
+                  selected = unique(merged_data$AgeGroup)[-1])
+  ),
+
+  
+  # Create a leaflet map
+  leafletOutput("map"),
+  
+  # Create a text output to display hover information
+  textOutput("hover_info")
+)
+
+# Create a server function for the Shiny app
+server <- function(input, output, session) {
+  # Create a reactive expression to filter the data based on the slider input
+    reactive_data <- reactive({
+    req(input$year_slider, input$agegroup_filter)  # Ensure inputs are available
+    merged_data %>% 
+      filter(Time == input$year_slider, AgeGroup == input$agegroup_filter)
+  })
+  
+  # Create the leaflet map
+  output$map <- renderLeaflet({
+     req(reactive_data())
+    # Define the color palette for population density (blue to red)
+    pal <- colorNumeric(
+      palette = c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"), # Blue to red color palette
+      domain = reactive_data()$TotalPop
+    )
+    
+    leaflet(reactive_data()) %>% 
+      addPolygons(
+        color = "black",  # Set border color
+        weight = 2,       # Set border weight
+        smoothFactor = 0.5,
+        opacity = 1.0, 
+        fillOpacity = 0.5,
+        fillColor = ~pal(TotalPop), # Fill color by population with gradient
+        highlightOptions = highlightOptions(
+          color = "white", 
+          weight = 2,
+          bringToFront = TRUE
+        ),
+        label = ~paste0("Planning Area: ", Name, "\n Total Population (", input$year_slider, "): ", TotalPop),
+        
+        layerId = ~Name  # Set layerId to Name for identifying the polygons
+      ) %>% 
+      addLegend(
+        position = "bottomright", 
+        pal = pal, 
+        values = ~TotalPop,
+        title = "Population Density"
+      )
+  })
+  
+   observeEvent(input$map_shape_mouseover, {
+    hover <- input$map_shape_mouseover
+    name <- hover$id
+    print(name)
+    
+    if (!is.null(name)) {
+      # Filter the data to get the TotalPop for the hovered area
+      total_pop <- reactive_data() %>% 
+        filter(Name == name) %>%
+        slice(1) %>%
+        pull(TotalPop)
+      print(total_pop)  
+      
+      output$hover_info <- renderText({
+        paste("Planning Area: ", name, "\nTotal Population: ", total_pop)
+      })
+    }
+  })
+  
+    # Observe mouseout events and clear hover_info
+  observeEvent(input$map_shape_mouseout, {
+    output$hover_info <- renderText({
+      ""
+    })
+  })
+}
+
+# Run the Shiny app
+shinyApp(ui, server)
+```
+
+# Introduction
+
+The geographical distribution of Singapore's population is crucial in urban studies and public policy. Our project examines how demographic characteristics relate to urban planning policies, as illustrated in Figure 1. This visualization, based on data from the Singapore Department of Statistics (2023), highlights significant demographic changes. Commended for its clarity, our work can be enhanced with interactive elements, expanded temporal ranges, and detailed geospatial mappings. These improvements will offer a more comprehensive view of how urban planning impacts population distribution and housing patterns in Singapore.
+
+# Previous Visualisation
+
+![Visualization of Choropleth Map of Resident Population Density by the Department of Statistics Singapore (Singstat 2023)](images/Figure1.PNG){#fig-label fig-align="center" width="70%"}
+
+# Strengths
+
+The Choropleth map contains several variables: population distribution (quantitative) and planning areas (categorical). Additionally, the visualization includes a heatmap that allow users to delve into subzones to see pattern in land development and population over time.
+
+# Suggested Improvements
+
+1.  Better contrast: Utilize high-contrast colors to improve accessibility for users with visual impairments, ensuring clarity and ease of interpretation for all users. One such example is the use of Color Universal Design (CUD) colors which are designed to be distinguishable by all users, including those with color vision deficiencies. ([Okabe and Ito 2008](https://jfly.uni-koeln.de/color/))
+
+2.  Reduced Data Density: Simplify the presentation by reducing the number of data points displayed simultaneously, thus preventing overcrowding and making the visualization more comprehensible.
+
+3.  Interactive Elements: Hovering over a country will display a tooltip with detailed information on the population size of a certain region of Singapore as well as the age profile.
+
+4.  Expanded Temporal Ranges: Introduce options for users to select specific time periods for analysis, facilitating a deeper exploration of trends over time.
+
+# Implementation
+
+## Data Sources
+
+-   Weekly counts of population data by planning area were obtained from the Singapore Department of Statistics. The data includes the total population, age groups, and planning areas for each year. Data Source from ([Singapore Department of Statistics](https://www.singstat.gov.sg/find-data/search-by-theme/population/geographic-distribution/latest-data))
+-   The geospatial data for the planning areas was obtained from the Master Plan 2019 Planning Area Boundary KML file. Data Source from ([Urban Redevelopment Authority (URA)](https://www.ura.gov.sg/maps/#master-plan))
+
+
+## Software
+
+-   *dplyr* package is used for data manipulation
+-   *leaflet* package is used for creating interactive maps
+-   *sf* package is used for handling spatial data
+-   *shiny* package is used for building interactive web applications
+
+# Improved Visualisation
+
+![Visualization of improved Choropleth Map of Resident Population Density by the Department of Statistics Singapore (Singstat 2023)](images/DataVisualization.png){#figlabel fig-align="center" width="75%"}
+
+# Insight
+
+We can see how certain regions like Punggol, Jurong West, and Tampines have experienced significant population growth over the years due to new housing development plans in the early 2000s. This visualization allows users to explore the population density of different planning areas in Singapore and observe changes over time. 
+
+# Further Suggestions for Interactivity
+
+We propose implementing dynamic UI updates, such as changing the map title or legend based on selected criteria, and using 'shinycssloaders' for loading animations. Additionally, offering options to download filtered data and visualizations would enhance user experience.
+
+
+Conditional highlighting based on user-defined criteria, such as population growth or elderly density, and integrating a time slider with play/pause controls for automatic changes over time would provide a more interactive and informative experience
+
+# Conclusion
+
+The plot can effectively communicate the relationship between the population density in each region of Singapore over time, and additionally allow curious readers to explore the data even further using interactivity.
+
+# References
+
+1.  Arnold, M., Goldschmitt, M., & Rigotti, T. (2023, June 21). Dealing with information overload: A comprehensive review. Frontiers in psychology. https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10322198/
+
+2.  Department of Statistics Singapore. (2000 - 2023). Singapore Residents by Planning Area / Subzone, Single Year of Age and Sex (June 2000-2010, June 2011-2020, June 2021, June 2022, June 2023) \[Data set\]. https://www.singstat.gov.sg/find-data/search-by-theme/population/geographic-distribution/latest-data
+
+3.  Okabe, M., & Ito, K. (2008). Color Universal Design (CUD): How to make figures and presentations that are friendly to Colorblind people. https://jfly.uni-koeln.de/color/
+
+4.  Singapore Department of Statistics. (2023). Population Trends 2023. https://www.singstat.gov.sg/-/media/files/publications/population/population2023.ashx
+
+5.  Urban Redevelopment Authority (URA). (2019). Master Plan 2019 Planning Area Boundary KML. https://www.ura.gov.sg/maps/#master-plan
+
